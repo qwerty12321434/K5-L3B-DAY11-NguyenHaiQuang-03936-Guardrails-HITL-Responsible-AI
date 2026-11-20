@@ -1,5 +1,5 @@
 """
-Assignment 11 — Audit Log starter (TODO).
+Assignment 11 — Correlated, redacted audit log.
 
 Records every interaction for forensics. Never blocks by itself —
 other layers catch attacks; this layer makes them reviewable.
@@ -7,6 +7,8 @@ other layers catch attacks; this layer makes them reviewable.
 from __future__ import annotations
 
 import json
+import time
+from uuid import uuid4
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,11 +25,22 @@ class AuditLogPlugin:
     def __init__(self):
         self.name = "audit_log"
         self.logs: list[dict] = []
-        self._open: dict[str, float] = {}
+        self._open: dict[str, dict] = {}
 
     def record_input(self, *, user_id: str, text: str, request_id: str | None = None):
-        """TODO: store input + start timestamp keyed by request_id/user_id."""
-        raise NotImplementedError("Implement AuditLogPlugin.record_input")
+        """Return the lookup key; sensitive text is redacted before storage."""
+        from guardrails.output_guardrails import content_filter
+
+        key = request_id or user_id
+        if key in self._open:
+            raise ValueError("An audit request with this correlation key is already open")
+        correlation_id = request_id or str(uuid4())
+        self._open[key] = {
+            "request_id": correlation_id, "user_id": user_id,
+            "input": content_filter(text)["redacted"],
+            "started_at": utc_now_iso(), "start_clock": time.monotonic(),
+        }
+        return key
 
     def record_output(
         self,
@@ -38,15 +51,26 @@ class AuditLogPlugin:
         layer: str | None = None,
         request_id: str | None = None,
     ):
-        """TODO: store output, layer decision, latency; append to self.logs."""
-        raise NotImplementedError("Implement AuditLogPlugin.record_output")
+        """Complete the matching request, without writing raw secret text."""
+        from guardrails.output_guardrails import content_filter
+
+        key = request_id or user_id
+        entry = self._open[key]
+        if entry["user_id"] != user_id:
+            raise ValueError("Audit user does not match the request")
+        self._open.pop(key)
+        elapsed = time.monotonic() - entry.pop("start_clock")
+        entry.update(output=content_filter(text)["redacted"], blocked=blocked,
+                     layer=layer, latency_ms=round(elapsed * 1000, 3),
+                     finished_at=utc_now_iso())
+        self.logs.append(entry)
 
     def export_json(self, filepath: str | None = None):
         """Write logs to disk (JSON array) under repo-root ``outputs/`` by default."""
-        # TODO: path = filepath or default_audit_log_path()
-        #       ensure parent dirs exist, dump self.logs with indent=2
-        _ = filepath or default_audit_log_path()
-        raise NotImplementedError("Implement AuditLogPlugin.export_json")
+        path = Path(filepath or default_audit_log_path())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.logs, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
 
 
 def utc_now_iso() -> str:
