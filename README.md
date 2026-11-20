@@ -1,5 +1,24 @@
 # Day 11 — Controlled Agent Security (2026)
 
+Học viên: **Nguyễn Hải Quang** · **K5-L3B** · mã trong tên repo: **03936**.
+
+Audit/monitoring chạy dưới dạng side observers; pipeline chặn input trước model
+và kiểm tra output sau model. Sau khi cài `requirements.txt`, điền `.env` và mở
+Ollama, chạy trực tiếp từ gốc repo, không cần script hỗ trợ:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/smoke tests/public -q
+.\.venv\Scripts\python.exe src/main.py --part 2
+.\.venv\Scripts\python.exe src/main.py --part 3
+.\.venv\Scripts\python.exe src/main.py --part 4
+.\.venv\Scripts\python.exe scripts/grade.py --submission-dir . --out outputs/grade_report.json
+```
+
+**Cấu hình thay thế đang chọn:** Blue chạy Ollama `qwen3.5-lab:8k` (từ
+`qwen3.5:4b`) do các lần gọi OpenRouter gặp HTTP 429/504; chưa xác nhận hết token.
+Đây là ngoại lệ so với yêu cầu Blue dùng `liquid/lfm-3-1.7b:free`. Kết quả/báo cáo
+ghi đúng provider/model; việc chấp nhận ngoại lệ do coach quyết định. Red vẫn Gemini.
+
 > 👤 **Hình thức:** bài tập **cá nhân** (1 người / 1 MSSV).  
 > 🎯 **Mục tiêu:** đóng vai **Blue Team** để học cách xây Guardrails phòng thủ, rồi đóng vai **Red Team** để tấn công agent **Red** hoặc **Red Advance**.  
 > ✅ Làm theo **Checkpoint 1 → 5** trong [`CHECKPOINTS.md`](CHECKPOINTS.md) · nộp theo [`SUBMISSION.md`](SUBMISSION.md).
