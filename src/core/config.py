@@ -4,7 +4,8 @@ Lab 11 — Configuration, provider selection, API keys.
 Hai tầng model (không trộn):
 
   Blue Team (CP2–CP3, guardrails / pipeline / protected agent)
-    → CỐ ĐỊNH OpenRouter ``liquid/lfm-3-1.7b:free``
+    → Mặc định OpenRouter ``liquid/lfm-3-1.7b:free`` theo rubric.
+    → BLUE_TEAM_PROVIDER=ollama để chạy local (ngoại lệ cần ghi rõ khi nộp).
        https://openrouter.ai/liquid/lfm-3-1.7b:free
     → Cần ``OPENROUTER_API_KEY``
 
@@ -34,7 +35,7 @@ PROVIDER_OPENAI = "openai"
 PROVIDER_GEMINI = "gemini"
 PROVIDER_OPENROUTER = "openrouter"
 
-# --- Blue Team (LOCKED) ---
+# --- Blue Team: original lab default + explicit local alternative ---
 BLUE_PROVIDER = PROVIDER_OPENROUTER
 BLUE_MODEL = "liquid/lfm-3-1.7b:free"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -100,11 +101,16 @@ except FileNotFoundError:
 # ---------------------------------------------------------------------------
 
 def get_blue_provider() -> str:
-    return BLUE_PROVIDER
+    provider = os.environ.get("BLUE_TEAM_PROVIDER", BLUE_PROVIDER).strip().lower()
+    if provider not in {PROVIDER_OPENROUTER, "ollama"}:
+        raise ValueError("BLUE_TEAM_PROVIDER must be openrouter or ollama")
+    return provider
 
 
 def get_blue_model() -> str:
-    # Hard-locked; env cannot override for the graded Blue Team path.
+    if get_blue_provider() == "ollama":
+        return os.environ.get("OLLAMA_MODEL", "qwen3.5-lab:8k").strip() or "qwen3.5-lab:8k"
+    # Keep the original model when running the rubric's OpenRouter path.
     return BLUE_MODEL
 
 
@@ -114,8 +120,12 @@ def get_openrouter_api_key() -> str:
 
 def blue_client_kwargs() -> dict:
     """OpenAI SDK kwargs pointing at OpenRouter (Blue Team only)."""
+    if get_blue_provider() == "ollama":
+        return {"base_url": "http://127.0.0.1:11434", "timeout": 180.0}
     return {
         "api_key": get_openrouter_api_key() or None,
+        "max_retries": 0,
+        "timeout": 60.0,
         "base_url": (
             os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL).strip()
             or OPENROUTER_BASE_URL
@@ -234,24 +244,28 @@ def is_harder_model() -> bool:
     return any(x in m for x in ("gpt-5.6", "pro", "gemini-3.8", "gemini-3.7"))
 
 
-def setup_api_key():
+def setup_api_key(*, blue: bool = True, red: bool = True):
     """Ensure keys for Blue (OpenRouter) + Red / Red Advance (OpenAI or Gemini)."""
-    if not get_openrouter_api_key():
-        os.environ["OPENROUTER_API_KEY"] = input(
-            "Enter OpenRouter API Key (Blue): "
-        ).strip()
-    print(f"Blue  — {blue_provider_label()}  [LOCKED]")
+    if blue:
+        if get_blue_provider() == PROVIDER_OPENROUTER and not get_openrouter_api_key():
+            raise RuntimeError("Set OPENROUTER_API_KEY in your local .env before running CP3")
+        print(f"Blue  — {blue_provider_label()}")
+        if get_blue_provider() == "ollama":
+            print("Local alternative: differs from the rubric's required OpenRouter model.")
+
+    if not red:
+        return
 
     red = get_red_provider()
     model = get_red_model()
     if red == PROVIDER_GEMINI:
         if not os.environ.get("GOOGLE_API_KEY", "").strip():
-            os.environ["GOOGLE_API_KEY"] = input("Enter Google API Key (Red): ").strip()
+            raise RuntimeError("Set GOOGLE_API_KEY in your local .env before running CP4")
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "0"
         print(f"Red / Red Advance  — gemini:{model}")
     else:
         if not get_openai_api_key():
-            os.environ["OPENAI_API_KEY"] = input("Enter OpenAI API Key (Red): ").strip()
+            raise RuntimeError("Set OPENAI_API_KEY in your local .env before running CP4")
         print(f"Red / Red Advance  — openai:{model}")
 
     print(

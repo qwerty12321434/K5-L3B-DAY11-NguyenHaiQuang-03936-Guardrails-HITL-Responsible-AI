@@ -1,7 +1,7 @@
 """
-OpenAI SDK runtime — dùng cho:
+Chat Completions runtime — dùng cho:
 
-  Blue Team → OpenRouter liquid/lfm-3-1.7b:free (create_blue_pair)
+  Blue Team → OpenRouter SDK (starter) hoặc Ollama local (create_blue_pair)
   Red Team  → OpenAI gpt-4o-mini (create_openai_pair) khi RED_TEAM_PROVIDER=openai
 
 Gemini Red Team dùng Google ADK trong agents/*.py — không đi qua file này.
@@ -45,32 +45,38 @@ class OpenAIRunner:
     client_kwargs: dict = field(default_factory=dict)
     input_hooks: list[Callable[[str], str | None]] = field(default_factory=list)
     output_hooks: list[Callable[[str], str]] = field(default_factory=list)
+    last_decision: dict = field(default_factory=dict, init=False)
 
     def _client(self):
         from openai import OpenAI
 
         return OpenAI(**(self.client_kwargs or {}))
 
-    async def chat(self, agent: OpenAIAgent, user_message: str) -> str:
+    async def chat(self, agent: OpenAIAgent, user_message: str, *, user_id: str = "student") -> str:
+        self.last_decision = {"blocked": False, "layer": None, "model_called": False}
         for hook in self.input_hooks:
             blocked = hook(user_message)
             if blocked:
+                self.last_decision.update(blocked=True, layer="input_hook")
                 return blocked
 
-        block_msg = await self._run_input_plugins(user_message)
+        block_msg = await self._run_input_plugins(user_message, user_id=user_id)
         if block_msg is not None:
             return block_msg
 
-        client = self._client()
-        completion = client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": agent.instruction},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=self.temperature,
-        )
-        text = (completion.choices[0].message.content or "").strip()
+        self.last_decision["model_called"] = True
+        messages = [
+            {"role": "system", "content": agent.instruction},
+            {"role": "user", "content": user_message},
+        ]
+        if self.provider == "ollama":
+            text = self._chat_ollama(messages)
+        else:
+            client = self._client()
+            completion = client.chat.completions.create(
+                model=self.model, messages=messages, temperature=self.temperature,
+            )
+            text = (completion.choices[0].message.content or "").strip()
 
         for hook in self.output_hooks:
             text = hook(text)
@@ -78,31 +84,49 @@ class OpenAIRunner:
         text = await self._run_output_plugins(text)
         return text
 
-    async def _run_input_plugins(self, user_message: str) -> str | None:
+    def _chat_ollama(self, messages: list[dict]) -> str:
+        """Call the local Ollama API; use the same input/output plugins."""
+        import json
+        from urllib.request import Request, urlopen
+
+        request = Request(
+            self.client_kwargs["base_url"] + "/api/chat",
+            data=json.dumps({
+                "model": self.model, "messages": messages,
+                "stream": False, "think": False,
+                "options": {"num_ctx": 8192, "num_predict": 512,
+                            "temperature": self.temperature},
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(request, timeout=self.client_kwargs["timeout"]) as response:
+            payload = json.load(response)
+        text = payload["message"]["content"].strip()
+        if not text:
+            raise RuntimeError("Ollama returned an empty response")
+        return text
+
+    async def _run_input_plugins(self, user_message: str, *, user_id: str = "student") -> str | None:
         if not self.plugins:
             return None
         try:
             from google.genai import types
         except ImportError:
-            return None
+            raise RuntimeError("Input plugins require google-genai; refusing unguarded execution") from None
 
         user_content = types.Content(
             role="user",
             parts=[types.Part.from_text(text=user_message)],
         )
-        ctx = _MockInvocationContext()
+        ctx = _MockInvocationContext(user_id=user_id)
         for plugin in self.plugins:
             cb = getattr(plugin, "on_user_message_callback", None)
             if cb is None:
                 continue
-            try:
-                result = await cb(
-                    invocation_context=ctx, user_message=user_content
-                )
-            except TypeError:
-                result = cb(invocation_context=ctx, user_message=user_content)
+            result = await cb(invocation_context=ctx, user_message=user_content)
             if result is None:
                 continue
+            self.last_decision.update(blocked=True, layer=plugin.name)
             return _content_to_text(result)
         return None
 
@@ -112,7 +136,7 @@ class OpenAIRunner:
         try:
             from google.genai import types
         except ImportError:
-            return text
+            raise RuntimeError("Output plugins require google-genai; refusing unguarded execution") from None
 
         content = types.Content(
             role="model", parts=[types.Part.from_text(text=text)]
@@ -131,13 +155,13 @@ class OpenAIRunner:
             cb = getattr(plugin, "after_model_callback", None)
             if cb is None:
                 continue
-            try:
-                out = await cb(callback_context=_Ctx(), llm_response=llm_response)
-            except TypeError:
-                out = cb(callback_context=_Ctx(), llm_response=llm_response)
+            before = _content_to_text(llm_response.content)
+            out = await cb(callback_context=_Ctx(), llm_response=llm_response)
             if out is not None and getattr(out, "content", None) is not None:
                 llm_response = out
-        return _content_to_text(llm_response.content) or text
+            if _content_to_text(llm_response.content) != before:
+                self.last_decision.update(blocked=True, layer=plugin.name)
+        return _content_to_text(llm_response.content)
 
 
 def _content_to_text(content: Any) -> str:
@@ -191,7 +215,7 @@ def create_blue_pair(
     output_hooks: list | None = None,
     temperature: float = 0.4,
 ) -> tuple[OpenAIAgent, OpenAIRunner]:
-    """Blue Team — always OpenRouter liquid/lfm-3-1.7b:free."""
+    """Blue Team — original OpenRouter default or explicitly selected Ollama."""
     return _make_pair(
         name=name,
         instruction=instruction,
